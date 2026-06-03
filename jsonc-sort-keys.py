@@ -958,8 +958,8 @@ def parse_object_item(
         pos += 1
 
     value = []
-    while (v := parse_value(doc, pos))[0] is not None:
-        value.append(v[0])
+    if (v := parse_value(doc, pos))[0] is not None:
+        value = [v[0]]
         span = merge_span(span, v[0].span)
         pos = v[1]
 
