@@ -177,6 +177,7 @@ class CSTArray(CSTValue):
 @dataclass
 class CSTObject(CSTValue):
     opening_bracket: Token
+    items_leading: list[Token]
     items: list[CSTObjectItem]
     items_trailing: list[Token]
     closing_bracket: Optional[Token]
@@ -185,6 +186,7 @@ class CSTObject(CSTValue):
         self._dump_parts(
             [
                 self.opening_bracket,
+                self.items_leading,
                 self.items,
                 self.items_trailing,
                 self.closing_bracket,
@@ -320,13 +322,15 @@ def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Tok
         MULTI_LINE_COMMENT = enum.auto()
         MULTI_LINE_COMMENT_AST = enum.auto()
         SINGLE_LINE_COMMENT = enum.auto()
+        SINGLE_LINE_COMMENT_CR = enum.auto()
 
         OTHERS = enum.auto()
 
     class CharCategory(Enum):
         OTHERS = 0x00
         SPACE = 0x09
-        NEWLINE = 0x0A
+        LF = 0x0A
+        CR = 0x0D
         QUOTE = 0x22
         COMMA = 0x2C
         SLASH = 0x2F
@@ -344,8 +348,10 @@ def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Tok
         match ch:
             case 0x09 | 0x20:
                 return CharCategory.SPACE
-            case 0x0A | 0x0D:
-                return CharCategory.NEWLINE
+            case 0x0A:
+                return CharCategory.LF
+            case 0x0D:
+                return CharCategory.CR
             case 0x22:
                 return CharCategory.QUOTE
             case 0x2C:
@@ -383,7 +389,7 @@ def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Tok
                         return None
                     case CharCategory.SPACE:
                         state = TokenizerState.SPACE
-                    case CharCategory.NEWLINE:
+                    case CharCategory.LF | CharCategory.CR:
                         state = TokenizerState.NEWLINE
                     case CharCategory.QUOTE:
                         state = TokenizerState.QUOTE
@@ -439,7 +445,7 @@ def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Tok
                         )
             case TokenizerState.NEWLINE:
                 match cat:
-                    case CharCategory.NEWLINE:
+                    case CharCategory.LF | CharCategory.CR:
                         pass
                     case _:
                         return Token(
@@ -644,7 +650,23 @@ def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Tok
                         state = TokenizerState.MULTI_LINE_COMMENT
             case TokenizerState.SINGLE_LINE_COMMENT:
                 match cat:
-                    case None | CharCategory.NEWLINE:
+                    case None | CharCategory.LF:
+                        return Token(
+                            type=TokenType.SINGLE_LINE_COMMENT,
+                            span=(start, pos),
+                            raw=doc[start:pos],
+                        )
+                    case CharCategory.CR:
+                        state = TokenizerState.SINGLE_LINE_COMMENT_CR
+            case TokenizerState.SINGLE_LINE_COMMENT_CR:
+                match cat:
+                    case CharCategory.LF:
+                        return Token(
+                            type=TokenType.SINGLE_LINE_COMMENT,
+                            span=(start, pos + 1),
+                            raw=doc[start : pos + 1],
+                        )
+                    case _:
                         return Token(
                             type=TokenType.SINGLE_LINE_COMMENT,
                             span=(start, pos),
@@ -655,7 +677,8 @@ def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Tok
                     case (
                         None
                         | CharCategory.SPACE
-                        | CharCategory.NEWLINE
+                        | CharCategory.LF
+                        | CharCategory.CR
                         | CharCategory.QUOTE
                         | CharCategory.COMMA
                         | CharCategory.SLASH
@@ -857,6 +880,7 @@ def parse_value(doc: list[Token], start: int) -> tuple[Optional[CSTValue], int]:
     pos += 1
     match opening_token.type:
         case TokenType.LEFT_CURLY_BRACKET:
+            items_leading, span, pos = parse_ws_until_newline(doc, span, pos)
             items = []
             while (v := parse_object_item(doc, pos))[0] is not None:
                 items.append(v[0])
@@ -882,6 +906,7 @@ def parse_value(doc: list[Token], start: int) -> tuple[Optional[CSTValue], int]:
                 span=span,
                 leading=leading,
                 opening_bracket=opening_token,
+                items_leading=items_leading,
                 items=items,
                 items_trailing=items_trailing,
                 closing_bracket=closing_bracket,
@@ -1022,6 +1047,29 @@ def parse_object_item(
     ), pos
 
 
+def parse_ws_until_newline(
+    doc: list[Token], span: Optional[Span], start: int
+) -> tuple[list[Token], Optional[Span], int]:
+    tokens = []
+    new_span = span
+    pos = start
+    while pos < len(doc):
+        token = doc[pos]
+        match token.type:
+            case TokenType.SPACE:
+                tokens.append(token)
+                new_span = merge_span(new_span, token.span)
+            case TokenType.NEWLINE:
+                tokens.append(token)
+                new_span = merge_span(new_span, token.span)
+                pos += 1
+                break
+            case _:
+                return [], span, start
+        pos += 1
+    return tokens, new_span, pos
+
+
 def parse_leading_wsc(
     doc: list[Token], span: Optional[Span], start: int
 ) -> tuple[list[Token], Optional[Span], int]:
@@ -1053,14 +1101,10 @@ def parse_trailing_wsc(
     while pos < len(doc):
         token = doc[pos]
         match token.type:
-            case (
-                TokenType.SPACE
-                | TokenType.MULTI_LINE_COMMENT
-                | TokenType.SINGLE_LINE_COMMENT
-            ):
+            case TokenType.SPACE | TokenType.MULTI_LINE_COMMENT:
                 tokens.append(token)
                 new_span = merge_span(new_span, token.span)
-            case TokenType.NEWLINE:
+            case TokenType.NEWLINE | TokenType.SINGLE_LINE_COMMENT:
                 tokens.append(token)
                 new_span = merge_span(new_span, token.span)
                 pos += 1
@@ -1135,9 +1179,9 @@ def transform_value(value: CSTValue, doc: bytes, permissive_mode: bool):
                 # Shift the comma as far as we can, trying to solve this round-trip issue:
                 #
                 # {"b": 2, "a": 1 /* after a */} would become {"a": 1 /* after a */, "b": 2} instead of {"a": 1, /* after a */"b": 2}
-                while (
-                    len(v.comma_trailing) != 0
-                    and v.comma_trailing[0].type != TokenType.SINGLE_LINE_COMMENT
+                while len(v.comma_trailing) != 0 and v.comma_trailing[0].type not in (
+                    TokenType.NEWLINE,
+                    TokenType.SINGLE_LINE_COMMENT,
                 ):
                     v.value_trailing.append(v.comma_trailing.pop(0))
         if value.closing_bracket is None:
