@@ -48,6 +48,15 @@ class Token:
     def dump(self, f: IO[bytes]) -> None:
         f.write(self.raw)
 
+    def sort_key(self) -> bytes:
+        match self.type:
+            case TokenType.STRING:
+                return unescape_string(self.raw)
+            case TokenType.OTHERS:
+                return self.raw
+            case _:
+                return b""
+
 
 @dataclass
 class CSTFragment(ABC):
@@ -73,6 +82,8 @@ class CSTFragment(ABC):
     @abstractmethod
     def dump(self, f: IO[bytes]) -> None: ...
 
+    def sort_key(self) -> bytes: ...
+
 
 @dataclass
 class CSTValue(CSTFragment):
@@ -97,10 +108,17 @@ class CSTArrayItem(CSTFragment):
             f,
         )
 
+    def sort_key(self) -> bytes:
+        result = b"".join(i.sort_key() for i in self.value)
+        for i in self.value_trailing:
+            result += i.sort_key()
+        return result
+
 
 @dataclass
 class CSTObjectItem(CSTFragment):
-    key: list[Token]
+    key: list[CSTValue]
+    key_trailing: list[Token]
     colon: Optional[Token]
     value: list[CSTValue]
     value_trailing: list[Token]
@@ -111,6 +129,7 @@ class CSTObjectItem(CSTFragment):
         self._dump_parts(
             [
                 self.key,
+                self.key_trailing,
                 self.colon,
                 self.value,
                 self.value_trailing,
@@ -121,14 +140,13 @@ class CSTObjectItem(CSTFragment):
         )
 
     def sort_key(self) -> bytes:
-        result = []
-        for k in self.key:
-            match k.type:
-                case TokenType.STRING:
-                    result.append(unescape_string(k.raw))
-                case TokenType.OTHERS:
-                    result.append(k.raw)
-        return b"".join(result)
+        # Actually the key would only be self.key[0], which must be a string,
+        # but I wrote the program to be so stupidly permissive to all kinds of malformed input.
+        # Here I might as well just throw all the garbage together to form a sort key.
+        result = b"".join(i.sort_key() for i in self.key)
+        for i in self.key_trailing:
+            result += i.sort_key()
+        return result
 
 
 @dataclass
@@ -149,6 +167,12 @@ class CSTArray(CSTValue):
             f,
         )
 
+    def sort_key(self) -> bytes:
+        result = b",".join(i.sort_key() for i in self.items)
+        for i in self.items_trailing:
+            result += i.sort_key()
+        return result
+
 
 @dataclass
 class CSTObject(CSTValue):
@@ -168,6 +192,13 @@ class CSTObject(CSTValue):
             f,
         )
 
+    def sort_key(self) -> bytes:
+        result = b"[object Object]"  # Since I already made the code so stupid, let's put one more stupid joke here.
+        result += b",".join(i.sort_key() for i in self.items)
+        for i in self.items_trailing:
+            result += i.sort_key()
+        return result
+
 
 @dataclass
 class CSTPrimitive(CSTValue):
@@ -175,6 +206,9 @@ class CSTPrimitive(CSTValue):
 
     def dump(self, f: IO[bytes]) -> None:
         self._dump_parts([self.value], f)
+
+    def sort_key(self) -> bytes:
+        return self.value.sort_key()
 
 
 def main() -> None:
@@ -937,6 +971,12 @@ def parse_object_item(
     leading, span, pos = parse_leading_wsc(doc, None, start)
 
     key = []
+    if (v := parse_value(doc, pos))[0] is not None:
+        key.append(v[0])
+        span = merge_span(span, v[0].span)
+        pos = v[1]
+
+    key_trailing = []
     colon = None
     while pos < len(doc):
         token = doc[pos]
@@ -953,7 +993,7 @@ def parse_object_item(
                 pos += 1
                 break
             case _:
-                key.append(token)
+                key_trailing.append(token)
                 span = merge_span(span, token.span)
         pos += 1
 
@@ -973,6 +1013,7 @@ def parse_object_item(
         span=span,
         leading=leading,
         key=key,
+        key_trailing=key_trailing,
         colon=colon,
         value=value,
         value_trailing=value_trailing,
