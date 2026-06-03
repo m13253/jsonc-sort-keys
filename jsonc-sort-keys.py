@@ -179,14 +179,22 @@ class CSTPrimitive(CSTValue):
 
 def main() -> None:
     argparser = argparse.ArgumentParser(
-        description="Sort JSONC objects by key names alphabetically"
+        description="A small tool to sort keys of a JSONC file in Unicode order"
     )
-    argparser.add_argument("input", help="Input file path")
     group = argparser.add_mutually_exclusive_group()
     group.add_argument(
-        "-i", "--inplace", action="store_true", help="Overwrite the input file in place"
+        "--dangerous-overwrite-inplace",
+        action="store_true",
+        help="Dangerous: overwrite the input file in place",
     )
-    group.add_argument("-o", "--output", type=Path, help="Output file path")
+    group.add_argument("-o", "--output", type=Path, help="output file path")
+    argparser.add_argument(
+        "-p",
+        "--permissive",
+        action="store_true",
+        help="tolerate all syntax errors and try to fix them at best effort",
+    )
+    argparser.add_argument("input", help="input file path")
     args = argparser.parse_args()
 
     if args.input == "-":
@@ -195,13 +203,12 @@ def main() -> None:
         with open(args.input, "rb") as f:
             doc = f.read()
 
-    cst = parse(doc)
-    transform(cst)
+    cst = parse(doc, args.permissive)
+    transform(cst, doc, args.permissive)
 
-    if args.output is not None:
-        with open(args.output, "wb") as f:
-            dump(cst, f)
-    elif args.inplace and args.input != "-":
+    # The "inplace" of stdin is mapped to stdout,
+    # thus "-" will fall through to the second branch.
+    if args.dangerous_overwrite_inplace and args.input != "-":
         temp_path = None
         try:
             with NamedTemporaryFile(
@@ -209,26 +216,38 @@ def main() -> None:
             ) as f:
                 temp_path = f.name
                 dump(cst, f)
-                os.rename(temp_path, args.input)
+
+                try:
+                    stat = os.stat(args.input)
+                    os.chmod(temp_path, stat.st_mode)
+                except Exception:
+                    # Either stat() or chmod() is not available on this OS or filesystem.
+                    pass
+
+                os.replace(temp_path, args.input)
                 temp_path = None
+
         finally:
             if temp_path is not None:
                 try:
                     os.unlink(temp_path)
                 except Exception:
                     pass
-    else:
+    elif args.output is None or args.output == "-":
         dump(cst, sys.stdout.buffer)
+    else:
+        with open(args.output, "wb") as f:
+            dump(cst, f)
 
 
-def parse(doc: bytes) -> list[CSTValue | Token]:
-    return parse_doc(tokenize_doc(doc))
+def parse(doc: bytes, permissive_mode: bool) -> list[CSTValue | Token]:
+    return parse_doc(tokenize_doc(doc, permissive_mode))
 
 
-def transform(doc: list[CSTValue | Token]) -> None:
-    for i in doc:
+def transform(cst: list[CSTValue | Token], doc: bytes, permissive_mode: bool) -> None:
+    for i in cst:
         if isinstance(i, CSTValue):
-            transform_value(i)
+            transform_value(i, doc, permissive_mode)
 
 
 def dump(doc: list[CSTValue | Token], f: IO[bytes]) -> None:
@@ -236,10 +255,10 @@ def dump(doc: list[CSTValue | Token], f: IO[bytes]) -> None:
         i.dump(f)
 
 
-def tokenize_doc(doc: bytes) -> list[Token]:
+def tokenize_doc(doc: bytes, permissive_mode: bool) -> list[Token]:
     tokens = []
     pos = 0
-    while (token := tokenize_next(doc, pos)) is not None:
+    while (token := tokenize_next(doc, pos, permissive_mode)) is not None:
         tokens.append(token)
         assert token.span is not None
         assert token.span[0] == pos
@@ -248,7 +267,7 @@ def tokenize_doc(doc: bytes) -> list[Token]:
     return tokens
 
 
-def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
+def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Token]:
 
     class TokenizerState(StrEnum):
         START = enum.auto()
@@ -397,6 +416,12 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.QUOTE:
                 match cat:
                     case None:
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            "missing '\"'",
+                        )
                         return Token(
                             type=TokenType.STRING,
                             span=(start, pos),
@@ -413,6 +438,13 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.QUOTE_BSLASH:
                 match cat:
                     case None:
+                        # The user actually needs to complete the last escape sequence first, then add '"'.
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            "missing '\"'",
+                        )
                         return Token(
                             type=TokenType.STRING,
                             span=(start, pos),
@@ -425,6 +457,12 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.QUOTE_BSLASH_U:
                 match cat:
                     case None:
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            "missing '\"'",
+                        )
                         return Token(
                             type=TokenType.STRING,
                             span=(start, pos),
@@ -445,6 +483,12 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.QUOTE_BSLASH_U1:
                 match cat:
                     case None:
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            "missing '\"'",
+                        )
                         return Token(
                             type=TokenType.STRING,
                             span=(start, pos),
@@ -465,6 +509,12 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.QUOTE_BSLASH_U2:
                 match cat:
                     case None:
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            "missing '\"'",
+                        )
                         return Token(
                             type=TokenType.STRING,
                             span=(start, pos),
@@ -485,6 +535,12 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.QUOTE_BSLASH_U3:
                 match cat:
                     case None:
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            "missing '\"'",
+                        )
                         return Token(
                             type=TokenType.STRING,
                             span=(start, pos),
@@ -517,6 +573,12 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.MULTI_LINE_COMMENT:
                 match cat:
                     case None:
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            'missing "*/"',
+                        )
                         return Token(
                             type=TokenType.MULTI_LINE_COMMENT,
                             span=(start, pos),
@@ -527,6 +589,12 @@ def tokenize_next(doc: bytes, start: int) -> Optional[Token]:
             case TokenizerState.MULTI_LINE_COMMENT_AST:
                 match cat:
                     case None:
+                        report_syntax_error(
+                            doc,
+                            pos,
+                            permissive_mode,
+                            'missing "*/"',
+                        )
                         return Token(
                             type=TokenType.MULTI_LINE_COMMENT,
                             span=(start, pos),
@@ -852,9 +920,6 @@ def parse_array_item(
 
     value_trailing, comma, span, pos = parse_lookahead_comma(doc, span, pos)
     comma_trailing, span, pos = parse_trailing_wsc(doc, span, pos)
-    if comma is None:
-        # Ensures trailing inline comments can be carried over after sorting
-        value_trailing, comma_trailing = comma_trailing, []
 
     return CSTArrayItem(
         span=span,
@@ -903,9 +968,6 @@ def parse_object_item(
 
     value_trailing, comma, span, pos = parse_lookahead_comma(doc, span, pos)
     comma_trailing, span, pos = parse_trailing_wsc(doc, span, pos)
-    if comma is None:
-        # Ensures trailing inline comments can be carried over after sorting
-        value_trailing, comma_trailing = comma_trailing, []
 
     return CSTObjectItem(
         span=span,
@@ -957,11 +1019,12 @@ def parse_trailing_wsc(
             ):
                 tokens.append(token)
                 new_span = merge_span(new_span, token.span)
-            case (
-                TokenType.NEWLINE
-                | TokenType.RIGHT_CURLY_BRACKET
-                | TokenType.RIGHT_SQUARE_BRACKET
-            ):
+            case TokenType.NEWLINE:
+                tokens.append(token)
+                new_span = merge_span(new_span, token.span)
+                pos += 1
+                break
+            case TokenType.RIGHT_CURLY_BRACKET | TokenType.RIGHT_SQUARE_BRACKET:
                 break
             case _:
                 return [], span, start
@@ -998,12 +1061,18 @@ def merge_span(old_span: Optional[Span], new_span: Optional[Span]) -> Optional[S
         return min(old_span[0], new_span[0]), max(old_span[1], new_span[1])
 
 
-def transform_value(value: CSTValue):
+def transform_value(value: CSTValue, doc: bytes, permissive_mode: bool):
     if isinstance(value, CSTArray):
         for i, v in enumerate(value.items):
             for j in v.value:
-                transform_value(j)
+                transform_value(j, doc, permissive_mode)
         if value.closing_bracket is None:
+            report_syntax_error(
+                doc,
+                None if value.span is None else value.span[1],
+                permissive_mode,
+                'missing "]"',
+            )
             value.closing_bracket = Token(
                 type=TokenType.RIGHT_SQUARE_BRACKET,
                 span=None,
@@ -1013,7 +1082,7 @@ def transform_value(value: CSTValue):
         value.items.sort(key=CSTObjectItem.sort_key)
         for i, v in enumerate(value.items):
             for j in v.value:
-                transform_value(j)
+                transform_value(j, doc, permissive_mode)
             if i == len(value.items) - 1:
                 v.comma = None
             elif v.comma is None:
@@ -1022,12 +1091,51 @@ def transform_value(value: CSTValue):
                     span=None,
                     raw=b",",
                 )
+                # Shift the comma as far as we can, trying to solve this round-trip issue:
+                #
+                # {"b": 2, "a": 1 /* after a */} would become {"a": 1 /* after a */, "b": 2} instead of {"a": 1, /* after a */"b": 2}
+                while (
+                    len(v.comma_trailing) != 0
+                    and v.comma_trailing[0].type != TokenType.SINGLE_LINE_COMMENT
+                ):
+                    v.value_trailing.append(v.comma_trailing.pop(0))
         if value.closing_bracket is None:
+            report_syntax_error(
+                doc,
+                None if value.span is None else value.span[1],
+                permissive_mode,
+                'missing "}"',
+            )
             value.closing_bracket = Token(
                 type=TokenType.RIGHT_CURLY_BRACKET,
                 span=None,
                 raw=b"}",
             )
+
+
+def report_syntax_error(
+    doc: bytes, offset: Optional[int], permissive_mode: bool, message: str
+) -> None:
+    if permissive_mode:
+        return
+    if offset is None:
+        print(
+            f"unrecoverable syntax error: {message}",
+            file=sys.stderr,
+        )
+    else:
+        row = (
+            doc.count(b"\n", 0, offset)
+            + doc.count(b"\r", 0, offset)
+            - doc.count(b"\r\n", 0, offset)
+            + 1
+        )
+        col = offset - max(doc.rfind(b"\n", 0, offset), doc.rfind(b"\r", 0, offset))
+        print(
+            f"unrecoverable syntax error at {row} {col}: {message}",
+            file=sys.stderr,
+        )
+    sys.exit(1)
 
 
 if __name__ == "__main__":
