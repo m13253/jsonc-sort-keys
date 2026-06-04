@@ -1196,9 +1196,6 @@ def transform_node(value: CSTNode, doc: bytes, permissive_mode: bool):
                     span=None,
                     raw=b",",
                 )
-                # Shift the comma as far as we can, trying to solve this round-trip issue:
-                #
-                # {"b": 2, "a": 1 /* after a */} would become {"a": 1 /* after a */, "b": 2} instead of {"a": 1, /* after a */"b": 2}
                 while (
                     len(v.value) != 0
                     and isinstance(v.value[-1], CSTUndecodedToken)
