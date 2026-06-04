@@ -5,7 +5,7 @@ A small tool to sort keys of a JSONC file in Unicode order
 ## Usage
 
 ```
-usage: jsonc-sort-keys.py [-h] [--dangerous-overwrite-inplace | -o OUTPUT] [-p] input
+usage: jsonc-sort-keys.py [-h] [--dump-syntax-tree] [--dangerous-overwrite-inplace | -o OUTPUT] [-p] input
 
 A small tool to sort keys of a JSONC file in Unicode order
 
@@ -14,6 +14,7 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
+  --dump-syntax-tree    Print the syntax tree instead of the JSONC file
   --dangerous-overwrite-inplace
                         Dangerous: overwrite the input file in place
   -o, --output OUTPUT   output file path

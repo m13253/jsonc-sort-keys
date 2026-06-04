@@ -223,6 +223,11 @@ def main() -> None:
     argparser = argparse.ArgumentParser(
         description="A small tool to sort keys of a JSONC file in Unicode order"
     )
+    argparser.add_argument(
+        "--dump-syntax-tree",
+        action="store_true",
+        help="Print the syntax tree instead of the JSONC file",
+    )
     group = argparser.add_mutually_exclusive_group()
     group.add_argument(
         "--dangerous-overwrite-inplace",
@@ -237,11 +242,6 @@ def main() -> None:
         help="tolerate all syntax errors and try to fix them at best effort",
     )
     argparser.add_argument("input", help="input file path")
-    argparser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Print the syntax tree instead of the JSONC file",
-    )
     args = argparser.parse_args()
 
     if args.input == "-":
@@ -262,7 +262,7 @@ def main() -> None:
                 "wb", dir=Path(args.input).parent, delete=False
             ) as f:
                 temp_path = f.name
-                if args.debug:
+                if args.dump_syntax_tree:
                     f.write(pformat(cst).encode("utf-8", "replace"))
                 else:
                     dump(cst, f)
@@ -284,13 +284,13 @@ def main() -> None:
                 except Exception:
                     pass
     elif args.output is None or args.output == "-":
-        if args.debug:
+        if args.dump_syntax_tree:
             pprint(cst)
         else:
             dump(cst, sys.stdout.buffer)
     else:
         with open(args.output, "wb") as f:
-            if args.debug:
+            if args.dump_syntax_tree:
                 f.write(pformat(cst).encode("utf-8", "replace"))
             else:
                 dump(cst, f)
@@ -1184,6 +1184,8 @@ def transform_node(value: CSTNode, doc: bytes, permissive_mode: bool):
     elif isinstance(value, CSTObject):
         value.items.sort(key=CSTObjectItem.sort_key)
         for i, v in enumerate(value.items):
+            for j in v.key:
+                transform_node(j, doc, permissive_mode)
             for j in v.value:
                 transform_node(j, doc, permissive_mode)
             if i == len(value.items) - 1:
