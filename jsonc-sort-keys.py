@@ -910,7 +910,7 @@ def parse_value(doc: list[Token], start: int) -> tuple[Optional[CSTValue], int]:
     pos += 1
     match opening_token.type:
         case TokenType.LEFT_CURLY_BRACKET:
-            items_leading, span, pos = parse_wsc_require_newline(doc, span, pos)
+            items_leading, span, pos = parse_wsc_until_newline(doc, span, pos)
             items = []
             while (v := parse_object_item(doc, pos))[0] is not None:
                 items.append(v[0])
@@ -1127,28 +1127,6 @@ def parse_wsc_until_newline(
                 return [], span, start
         pos += 1
     return tokens, new_span, pos
-
-
-def parse_wsc_require_newline(
-    doc: list[Token], span: Optional[Span], start: int
-) -> tuple[list[Token], Optional[Span], int]:
-    tokens = []
-    new_span = span
-    pos = start
-    while pos < len(doc):
-        token = doc[pos]
-        match token.type:
-            case TokenType.SPACE | TokenType.MULTI_LINE_COMMENT:
-                tokens.append(token)
-                new_span = merge_span(new_span, token.span)
-            case TokenType.NEWLINE | TokenType.SINGLE_LINE_COMMENT:
-                tokens.append(token)
-                new_span = merge_span(new_span, token.span)
-                return tokens, new_span, pos + 1
-            case _:
-                break
-        pos += 1
-    return [], span, start
 
 
 def merge_span(old_span: Optional[Span], new_span: Optional[Span]) -> Optional[Span]:
