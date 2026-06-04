@@ -40,9 +40,9 @@ into:
 }
 ```
 
-This program tries to maintain the exact whitespace and formatting as the input file. Therefore, after the transformation, you may need to use other tools (e.g., Zed) to reformat the file.
+This program tries to maintain the exact whitespace and formatting as the input file. Therefore, due to the reordering, you may need to use other tools (e.g., Zed) to reformat the file.
 
-The program tolerates most syntax errors because it does not fully decode the JSON. You may use `--permissive` to tolerate *all* syntax errors. (In other words: This program has very poor error detection. If you feed it invalid input, you may get garbage output.)
+The program tolerates most syntax errors because it does not fully decode the JSON. You may use `--permissive` to tolerate *all* syntax errors. (In other words: This program almost has no error detection. If you feed it invalid input, you may get garbage output.)
 
 ## Disclaimer
 
