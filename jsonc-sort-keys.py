@@ -8,10 +8,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 from pathlib import Path
+from pprint import pformat, pprint
 from tempfile import NamedTemporaryFile
 from typing import IO, Optional, Sequence
 
-CST = list["CSTValue | Token"]
 Span = tuple[int, int]
 
 
@@ -66,7 +66,7 @@ class CSTFragment(ABC):
     def _dump_parts(
         self,
         parts: Sequence[
-            Sequence["CSTFragment"] | Sequence[Token] | "CSTFragment" | Token | None
+            Sequence["CSTFragment | Token"] | Optional["CSTFragment | Token"]
         ],
         f: IO[bytes],
     ) -> None:
@@ -82,18 +82,22 @@ class CSTFragment(ABC):
     @abstractmethod
     def dump(self, f: IO[bytes]) -> None: ...
 
+    @abstractmethod
     def sort_key(self) -> bytes: ...
 
 
 @dataclass
-class CSTValue(CSTFragment):
+class CSTNode(CSTFragment):
     pass
 
 
 @dataclass
+class CSTValue(CSTNode): ...
+
+
+@dataclass
 class CSTArrayItem(CSTFragment):
-    value: list[CSTValue]
-    value_trailing: list[Token]
+    value: list[CSTNode]
     comma: Optional[Token]
     comma_trailing: list[Token]  # Up to newline
 
@@ -101,7 +105,6 @@ class CSTArrayItem(CSTFragment):
         self._dump_parts(
             [
                 self.value,
-                self.value_trailing,
                 self.comma,
                 self.comma_trailing,
             ],
@@ -110,18 +113,14 @@ class CSTArrayItem(CSTFragment):
 
     def sort_key(self) -> bytes:
         result = b"".join(i.sort_key() for i in self.value)
-        for i in self.value_trailing:
-            result += i.sort_key()
         return result
 
 
 @dataclass
 class CSTObjectItem(CSTFragment):
-    key: list[CSTValue]
-    key_trailing: list[Token]
+    key: list[CSTNode]
     colon: Optional[Token]
-    value: list[CSTValue]
-    value_trailing: list[Token]
+    value: list[CSTNode]
     comma: Optional[Token]
     comma_trailing: list[Token]  # Up to newline
 
@@ -129,10 +128,8 @@ class CSTObjectItem(CSTFragment):
         self._dump_parts(
             [
                 self.key,
-                self.key_trailing,
                 self.colon,
                 self.value,
-                self.value_trailing,
                 self.comma,
                 self.comma_trailing,
             ],
@@ -144,8 +141,6 @@ class CSTObjectItem(CSTFragment):
         # but I wrote the program to be so stupidly permissive to all kinds of malformed input.
         # Here I might as well just throw all the garbage together to form a sort key.
         result = b"".join(i.sort_key() for i in self.key)
-        for i in self.key_trailing:
-            result += i.sort_key()
         return result
 
 
@@ -213,6 +208,17 @@ class CSTPrimitive(CSTValue):
         return self.value.sort_key()
 
 
+@dataclass
+class CSTUndecodedToken(CSTNode):
+    value: Token
+
+    def dump(self, f: IO[bytes]) -> None:
+        self._dump_parts([self.value], f)
+
+    def sort_key(self) -> bytes:
+        return self.value.sort_key()
+
+
 def main() -> None:
     argparser = argparse.ArgumentParser(
         description="A small tool to sort keys of a JSONC file in Unicode order"
@@ -231,6 +237,11 @@ def main() -> None:
         help="tolerate all syntax errors and try to fix them at best effort",
     )
     argparser.add_argument("input", help="input file path")
+    argparser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print the syntax tree instead of the JSONC file",
+    )
     args = argparser.parse_args()
 
     if args.input == "-":
@@ -251,7 +262,10 @@ def main() -> None:
                 "wb", dir=Path(args.input).parent, delete=False
             ) as f:
                 temp_path = f.name
-                dump(cst, f)
+                if args.debug:
+                    f.write(pformat(cst).encode("utf-8", "replace"))
+                else:
+                    dump(cst, f)
 
                 try:
                     stat = os.stat(args.input)
@@ -270,23 +284,28 @@ def main() -> None:
                 except Exception:
                     pass
     elif args.output is None or args.output == "-":
-        dump(cst, sys.stdout.buffer)
+        if args.debug:
+            pprint(cst)
+        else:
+            dump(cst, sys.stdout.buffer)
     else:
         with open(args.output, "wb") as f:
-            dump(cst, f)
+            if args.debug:
+                f.write(pformat(cst).encode("utf-8", "replace"))
+            else:
+                dump(cst, f)
 
 
-def parse(doc: bytes, permissive_mode: bool) -> list[CSTValue | Token]:
+def parse(doc: bytes, permissive_mode: bool) -> list[CSTNode]:
     return parse_doc(tokenize_doc(doc, permissive_mode))
 
 
-def transform(cst: list[CSTValue | Token], doc: bytes, permissive_mode: bool) -> None:
+def transform(cst: list[CSTNode], doc: bytes, permissive_mode: bool) -> None:
     for i in cst:
-        if isinstance(i, CSTValue):
-            transform_value(i, doc, permissive_mode)
+        transform_node(i, doc, permissive_mode)
 
 
-def dump(doc: list[CSTValue | Token], f: IO[bytes]) -> None:
+def dump(doc: list[CSTNode], f: IO[bytes]) -> None:
     for i in doc:
         i.dump(f)
 
@@ -650,11 +669,17 @@ def tokenize_next(doc: bytes, start: int, permissive_mode: bool) -> Optional[Tok
                         state = TokenizerState.MULTI_LINE_COMMENT
             case TokenizerState.SINGLE_LINE_COMMENT:
                 match cat:
-                    case None | CharCategory.LF:
+                    case None:
                         return Token(
                             type=TokenType.SINGLE_LINE_COMMENT,
                             span=(start, pos),
                             raw=doc[start:pos],
+                        )
+                    case CharCategory.LF:
+                        return Token(
+                            type=TokenType.SINGLE_LINE_COMMENT,
+                            span=(start, pos + 1),
+                            raw=doc[start : pos + 1],
                         )
                     case CharCategory.CR:
                         state = TokenizerState.SINGLE_LINE_COMMENT_CR
@@ -857,22 +882,31 @@ def unescape_string(raw: bytes) -> bytes:
     return bytes(result)
 
 
-def parse_doc(doc: list[Token]) -> list[CSTValue | Token]:
+def parse_doc(doc: list[Token]) -> list[CSTNode]:
     results = []
     pos = 0
     while pos < len(doc):
-        token = doc[pos]
-        value, pos = parse_value(doc, pos)
-        if value is None:
-            results.append(token)
-            pos += 1
-        else:
+        value, pos = try_parse_value(doc, pos)
+        if value is not None:
             results.append(value)
     return results
 
 
+def try_parse_value(doc: list[Token], start: int) -> tuple[Optional[CSTNode], int]:
+    if start >= len(doc):
+        return None, start
+    token = doc[start]
+    value, pos = parse_value(doc, start)
+    if value is None:
+        return CSTUndecodedToken(
+            span=(start, start + 1), leading=[], value=token
+        ), start + 1
+    else:
+        return value, pos
+
+
 def parse_value(doc: list[Token], start: int) -> tuple[Optional[CSTValue], int]:
-    leading, span, pos = parse_leading_wsc(doc, None, start)
+    leading, span, pos = parse_wsc(doc, None, start)
     if pos >= len(doc):
         return None, start
 
@@ -880,7 +914,7 @@ def parse_value(doc: list[Token], start: int) -> tuple[Optional[CSTValue], int]:
     pos += 1
     match opening_token.type:
         case TokenType.LEFT_CURLY_BRACKET:
-            items_leading, span, pos = parse_ws_until_newline(doc, span, pos)
+            items_leading, span, pos = parse_wsc_require_newline(doc, span, pos)
             items = []
             while (v := parse_object_item(doc, pos))[0] is not None:
                 items.append(v[0])
@@ -951,40 +985,40 @@ def parse_value(doc: list[Token], start: int) -> tuple[Optional[CSTValue], int]:
             return None, start
 
 
-def parse_primitive(doc: list[Token], start: int) -> tuple[Optional[CSTValue], int]:
-    leading, span, pos = parse_leading_wsc(doc, None, start)
-
-    if pos < len(doc):
-        token = doc[pos]
-        match token.type:
-            case TokenType.STRING | TokenType.OTHERS:
-                span = merge_span(span, token.span)
-                return CSTPrimitive(span=span, leading=leading, value=token), pos + 1
-
-    return None, start
-
-
 def parse_array_item(
     doc: list[Token], start: int
 ) -> tuple[Optional[CSTArrayItem], int]:
-    leading, span, pos = parse_leading_wsc(doc, None, start)
+    leading, span, pos = parse_wsc(doc, None, start)
 
     value = []
-    while (v := parse_value(doc, pos))[0] is not None:
+    while (v := try_parse_value(doc, pos))[0] is not None:
+        if isinstance(v[0], CSTUndecodedToken) and v[0].value.type in (
+            TokenType.COMMA,
+            TokenType.RIGHT_CURLY_BRACKET,
+            TokenType.RIGHT_SQUARE_BRACKET,
+        ):
+            break
         value.append(v[0])
         span = merge_span(span, v[0].span)
         pos = v[1]
-    if len(value) == 0:
+
+    comma = None
+    if pos < len(doc):
+        token = doc[pos]
+        if token.type == TokenType.COMMA:
+            comma = token
+            span = merge_span(span, token.span)
+            pos += 1
+
+    if len(value) == 0 and comma is None:
         return None, start
 
-    value_trailing, comma, span, pos = parse_lookahead_comma(doc, span, pos)
-    comma_trailing, span, pos = parse_trailing_wsc(doc, span, pos)
+    comma_trailing, span, pos = parse_wsc_until_newline(doc, span, pos)
 
     return CSTArrayItem(
         span=span,
         leading=leading,
         value=value,
-        value_trailing=value_trailing,
         comma=comma,
         comma_trailing=comma_trailing,
     ), pos
@@ -993,84 +1027,66 @@ def parse_array_item(
 def parse_object_item(
     doc: list[Token], start: int
 ) -> tuple[Optional[CSTObjectItem], int]:
-    leading, span, pos = parse_leading_wsc(doc, None, start)
+    leading, span, pos = parse_wsc(doc, None, start)
 
     key = []
-    if (v := parse_value(doc, pos))[0] is not None:
-        key.append(v[0])
-        span = merge_span(span, v[0].span)
-        pos = v[1]
+    while (k := try_parse_value(doc, pos))[0] is not None:
+        if isinstance(k[0], CSTUndecodedToken) and k[0].value.type in (
+            TokenType.COLON,
+            TokenType.COMMA,
+            TokenType.RIGHT_CURLY_BRACKET,
+            TokenType.RIGHT_SQUARE_BRACKET,
+        ):
+            break
+        key.append(k[0])
+        span = merge_span(span, k[0].span)
+        pos = k[1]
 
-    key_trailing = []
     colon = None
-    while pos < len(doc):
+    if pos < len(doc):
         token = doc[pos]
-        match token.type:
-            case (
-                TokenType.RIGHT_CURLY_BRACKET
-                | TokenType.RIGHT_SQUARE_BRACKET
-                | TokenType.COMMA
-            ):
-                break
-            case TokenType.COLON:
-                colon = token
-                span = merge_span(span, token.span)
-                pos += 1
-                break
-            case _:
-                key_trailing.append(token)
-                span = merge_span(span, token.span)
-        pos += 1
+        if token.type == TokenType.COLON:
+            colon = token
+            span = merge_span(span, token.span)
+            pos += 1
 
     value = []
-    if (v := parse_value(doc, pos))[0] is not None:
-        value = [v[0]]
+    while (v := try_parse_value(doc, pos))[0] is not None:
+        if isinstance(v[0], CSTUndecodedToken) and v[0].value.type in (
+            TokenType.COMMA,
+            TokenType.RIGHT_CURLY_BRACKET,
+            TokenType.RIGHT_SQUARE_BRACKET,
+        ):
+            break
+        value.append(v[0])
         span = merge_span(span, v[0].span)
         pos = v[1]
 
-    if len(key) == 0 and colon is None and len(value) == 0:
+    comma = None
+    if pos < len(doc):
+        token = doc[pos]
+        if token.type == TokenType.COMMA:
+            comma = token
+            span = merge_span(span, token.span)
+            pos += 1
+
+    if len(key) == 0 and colon is None and len(value) == 0 and comma is None:
         return None, start
 
-    value_trailing, comma, span, pos = parse_lookahead_comma(doc, span, pos)
-    comma_trailing, span, pos = parse_trailing_wsc(doc, span, pos)
+    comma_trailing, span, pos = parse_wsc_until_newline(doc, span, pos)
 
     return CSTObjectItem(
         span=span,
         leading=leading,
         key=key,
-        key_trailing=key_trailing,
         colon=colon,
         value=value,
-        value_trailing=value_trailing,
         comma=comma,
         comma_trailing=comma_trailing,
     ), pos
 
 
-def parse_ws_until_newline(
-    doc: list[Token], span: Optional[Span], start: int
-) -> tuple[list[Token], Optional[Span], int]:
-    tokens = []
-    new_span = span
-    pos = start
-    while pos < len(doc):
-        token = doc[pos]
-        match token.type:
-            case TokenType.SPACE:
-                tokens.append(token)
-                new_span = merge_span(new_span, token.span)
-            case TokenType.NEWLINE:
-                tokens.append(token)
-                new_span = merge_span(new_span, token.span)
-                pos += 1
-                break
-            case _:
-                return [], span, start
-        pos += 1
-    return tokens, new_span, pos
-
-
-def parse_leading_wsc(
+def parse_wsc(
     doc: list[Token], span: Optional[Span], start: int
 ) -> tuple[list[Token], Optional[Span], int]:
     tokens = []
@@ -1092,7 +1108,7 @@ def parse_leading_wsc(
     return tokens, span, pos
 
 
-def parse_trailing_wsc(
+def parse_wsc_until_newline(
     doc: list[Token], span: Optional[Span], start: int
 ) -> tuple[list[Token], Optional[Span], int]:
     tokens = []
@@ -1117,24 +1133,26 @@ def parse_trailing_wsc(
     return tokens, new_span, pos
 
 
-def parse_lookahead_comma(
+def parse_wsc_require_newline(
     doc: list[Token], span: Optional[Span], start: int
-) -> tuple[list[Token], Optional[Token], Optional[Span], int]:
-    comma_leading = []
+) -> tuple[list[Token], Optional[Span], int]:
+    tokens = []
+    new_span = span
     pos = start
     while pos < len(doc):
         token = doc[pos]
         match token.type:
-            case TokenType.RIGHT_CURLY_BRACKET | TokenType.RIGHT_SQUARE_BRACKET:
-                break
-            case TokenType.COMMA:
-                span = merge_span(span, token.span)
-                return comma_leading, token, span, pos + 1
+            case TokenType.SPACE | TokenType.MULTI_LINE_COMMENT:
+                tokens.append(token)
+                new_span = merge_span(new_span, token.span)
+            case TokenType.NEWLINE | TokenType.SINGLE_LINE_COMMENT:
+                tokens.append(token)
+                new_span = merge_span(new_span, token.span)
+                return tokens, new_span, pos + 1
             case _:
-                comma_leading.append(token)
-                span = merge_span(span, token.span)
+                break
         pos += 1
-    return [], None, span, start
+    return [], span, start
 
 
 def merge_span(old_span: Optional[Span], new_span: Optional[Span]) -> Optional[Span]:
@@ -1146,11 +1164,11 @@ def merge_span(old_span: Optional[Span], new_span: Optional[Span]) -> Optional[S
         return min(old_span[0], new_span[0]), max(old_span[1], new_span[1])
 
 
-def transform_value(value: CSTValue, doc: bytes, permissive_mode: bool):
+def transform_node(value: CSTNode, doc: bytes, permissive_mode: bool):
     if isinstance(value, CSTArray):
         for i, v in enumerate(value.items):
             for j in v.value:
-                transform_value(j, doc, permissive_mode)
+                transform_node(j, doc, permissive_mode)
         if value.closing_bracket is None:
             report_syntax_error(
                 doc,
@@ -1167,7 +1185,7 @@ def transform_value(value: CSTValue, doc: bytes, permissive_mode: bool):
         value.items.sort(key=CSTObjectItem.sort_key)
         for i, v in enumerate(value.items):
             for j in v.value:
-                transform_value(j, doc, permissive_mode)
+                transform_node(j, doc, permissive_mode)
             if i == len(value.items) - 1:
                 v.comma = None
             elif v.comma is None:
@@ -1179,11 +1197,18 @@ def transform_value(value: CSTValue, doc: bytes, permissive_mode: bool):
                 # Shift the comma as far as we can, trying to solve this round-trip issue:
                 #
                 # {"b": 2, "a": 1 /* after a */} would become {"a": 1 /* after a */, "b": 2} instead of {"a": 1, /* after a */"b": 2}
-                while len(v.comma_trailing) != 0 and v.comma_trailing[0].type not in (
-                    TokenType.NEWLINE,
-                    TokenType.SINGLE_LINE_COMMENT,
+                while (
+                    len(v.value) != 0
+                    and isinstance(v.value[-1], CSTUndecodedToken)
+                    and (token := v.value[-1].value).type
+                    in (
+                        TokenType.SPACE,
+                        TokenType.NEWLINE,
+                        TokenType.SINGLE_LINE_COMMENT,
+                    )
                 ):
-                    v.value_trailing.append(v.comma_trailing.pop(0))
+                    v.comma_trailing.insert(0, token)
+                    del v.value[-1]
         if value.closing_bracket is None:
             report_syntax_error(
                 doc,
