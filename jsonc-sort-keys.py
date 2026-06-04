@@ -164,8 +164,6 @@ class CSTArray(CSTValue):
 
     def sort_key(self) -> bytes:
         result = b",".join(i.sort_key() for i in self.items)
-        for i in self.items_trailing:
-            result += i.sort_key()
         return result
 
 
@@ -192,8 +190,6 @@ class CSTObject(CSTValue):
     def sort_key(self) -> bytes:
         result = b"[object Object]"  # Since I already made the code so stupid, let's put one more stupid joke here.
         result += b",".join(i.sort_key() for i in self.items)
-        for i in self.items_trailing:
-            result += i.sort_key()
         return result
 
 
