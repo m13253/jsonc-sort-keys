@@ -47,3 +47,7 @@ The program tolerates most syntax errors because it does not fully decode the JS
 ## Disclaimer
 
 I developed this tool because Zed cannot sort its own configuration file. I shared my code for the hope that it may benefit other people and it comes with absolutely no warranty. The software may contain bugs and may accidentally corrupt files. Please make backups of your files!
+
+## Not vibe coded disclaimer
+
+This tool is developed by human. However, if you want to see a version written by GPT-5.5, please check the [vibe-coded](https://codeberg.org/m13253/jsonc-sort-keys/src/branch/vibe-coded) branch.
